@@ -1,0 +1,535 @@
+// do not change order of defines and includes
+
+#define ENCODER_DO_NOT_USE_INTERRUPTS  // not sure whey these are needed but they are, do not change
+#define ENCODER_OPTIMIZE_INTERRUPTS
+#include <Encoder.h>
+#include <EEPROM.h>
+#define PinInt1 0   // interrupt pins for forward and reverser step inputs from audio board and other accessories
+#define PinInt2 16
+
+// instantiate the various encoder inputs
+Encoder readEnc1(5, 6);
+Encoder readEnc2(18,20); // encoder for first knob if three knob mode
+Encoder readEnc3(7,17); // encoder for second knob if three knob mode
+Encoder readEnc4(21,15); // encoder for third knob if three knob mode
+
+#include <AccelStepper.h>  // accelstepper is used for repeated motion to acceleration control at starts stops and reverses
+AccelStepper stepper(AccelStepper::DRIVER,3,4);
+
+
+// the crazy pin use is due to change from teensy 2 to 3.1
+
+// lots of global variables used for a couple of reasons that might not be valid. mighttry to reduce number of global variables 
+// also duplicate subroutines that are similar are used instead of passing variables to one routine.
+
+//const int enable_pin = 16;  // not used because it is not necessary and also because pin 16 is used for audio pulse input leaving it here in case it is needed?
+
+int count = 0;
+int encoder_scale;
+int encoder_up_count = 1;  // a positive number such as 1 0 for both of these does not divide encoder count
+int encoder_down_count = -1;  // a negative number such as -1
+int position_count;
+int step_count;
+boolean run = true;
+boolean forward = true;
+boolean new_parameters = false;
+boolean was_reset = false;
+boolean no_three_knob = true;
+boolean test_mode = false;
+volatile boolean do_CW = false;  // modified in interrupt service routnes so need to be volatile
+volatile boolean do_CCW = false;
+int scale = 2;
+int min_stroke;
+int max_stroke;
+int max_speed;
+int max_stroke_default;
+int max_speed_default;
+int max_stroke_setup;
+int max_speed_setup;
+int min_speed;
+int quad_delay;
+int readEncoder_1;
+int readEncoder_2;
+int readEncoder_3;
+int readEncoder_4;
+int read_count;
+int offset_scale;  
+int offset_speed;
+int offset_accel;
+int position;
+int address = 0; //EEPROM address to start reading from
+int value;  
+long offset;  // these were int but changed to long 
+long off_plus_stroke;
+long stroke;
+long acceleration;
+long min_acceleration;
+long max_acceleration;
+long acceleration_setup;
+long acceleration_default;
+//unsigned long CW_count;  // these are currently ot used, only for diagnosis
+//unsigned long CCW_count;
+int speed;
+int read_stroke;
+int read_speed;
+int read_offset;
+int ratio;
+int ratio_bit_0 = 0;
+int ratio_bit_1 = 0;
+int vibe_limit;
+int crawl_delay;
+int one_count;
+int zero_count;
+int audio_scale;
+
+// the following are used to convert the three knob enocders control to logarithmic instead of linear
+// these can use a bit of fine tuning. i have a perl script that generates these log tables with offsets
+
+int speed_table[] = // LOG 3 with 20 offset used for speed
+      {10,20,20,20,20,20,21,23,24,27,30,34,39,45,51,59,69,79,91,104,119,136,154,175,197,221,247,275,
+      306,339,375,413,453,497,543,592,644,699,757,818,883,951,1023,1098,1177,1260,1346,1437,1531,
+      1630,1732,1839,1839,1951,2067,2187,2312,2442,2576,2716,2860,3010,3164,3324,3489,3660,3836,
+      4018,4205,4398,4597,4802,5013,5230,5454,5683,5919,6162,6410,6666,6928,7198,7474,7757,8047,
+      8344,8649,8960,9280,9607,9941,10283,10633,10991,11356,11730,12112,12502,12900,13307,13722,
+      14146,14578,15020,15020,15020,15020
+}; // add a few extra to be sure
+
+int stroke_table[] = //
+      {0,50,60,70,80,86,92,112,131,150,169,195,220,252,278,310,342,374,413,451,489,528,566,605,649,694,739,
+      784,829,880,925,976,1027,1079,1130,1181,1239,1290,1347,1405,1463,1520,1578,1636,1693,1757,
+      1821,1879,1943,2007,2071,2142,2206,2276,2340,2340,2411,2475,2545,2615,2686,2763,2833,2904,
+      2980,3051,3128,3205,3281,3352,3435,3512,3589,3666,3749,3826,3909,3986,4069,4152,4236,4319,
+      4402,4485,4575,4658,4748,4831,4921,5004,5094,5183,5273,5363,5452,5542,5638,5728,5817,5913,
+      6003,6099,6195,6291,6387,6483,6500,6500, 6500
+}; // a few extra in case array index is too high
+
+
+int offset_table[] = // LOG 2 with 80 offset used for speed added a couple of extra at begin to stop sither when stalled 
+      {70,80,86,92,112,131,150,169,195,220,252,278,310,342,374,413,451,489,528,566,605,649,694,739,
+      784,829,880,925,976,1027,1079,1130,1181,1239,1290,1347,1405,1463,1520,1578,1636,1693,1757,
+      1821,1879,1943,2007,2071,2142,2206,2276,2340,2340,2411,2475,2545,2615,2686,2763,2833,2904,
+      2980,3051,3128,3205,3281,3352,3435,3512,3589,3666,3749,3826,3909,3986,4069,4152,4236,4319,
+      4402,4485,4575,4658,4748,4831,4921,5004,5094,5183,5273,5363,5452,5542,5638,5728,5817,5913,
+      6003,6099,6195,6291,6387,6483,6500,6500, 6500
+}; // a few extra in case array index is too high
+
+void setup() {
+  Serial.begin(9600);  // only used for reporting accumulated values which are read on computer when requested
+  delay(500);  // need a delay to allow serial communication to initialize various delays in setup can probably be merged and shortened
+  Serial.println("begin setup");
+  quad_delay = 10;
+  min_stroke = 30;
+  max_stroke = 6500;  // 4000 for auto tech higher for gecko depending on encoder scale 7000 for encode scale 4
+  max_speed = 12000;  // 12000 for auto tech 15000 for gecko
+  max_stroke_default = max_stroke;
+  max_speed_default = max_speed;
+  min_speed = 20;
+  vibe_limit = 125;  // below this stroke length max speed is suspended
+  offset_scale = 8;
+  audio_scale = 2;
+  offset_speed = 100000;
+  offset_accel = 100000;  
+  acceleration = 200000;  // do not change from 200000 unless there is a really good reason
+  acceleration_default = acceleration;
+  min_acceleration = 1000;
+  max_acceleration = acceleration;  
+  encoder_scale = 2;   // 1 for cheap driver  2 for gecko?
+  stepper.setMaxSpeed(3000.0);
+  stepper.setAcceleration(acceleration); 
+//  stepper.setEnablePin(enable_pin);
+  stepper.setPinsInverted(true,true,true);  
+  stepper.setMinPulseWidth(20);
+  stepper.setCurrentPosition(0)	;
+  
+  read_stroke = 0;
+  read_speed = 0;
+  read_offset = 0;  
+  position = 0; 
+  delay(2000);  // this is needed for some fucking reason to let voltage stabilize??? can probably shorten it if delay after serial setup is not removed
+  
+  pinMode(PinInt1, INPUT_PULLUP); // pin 0
+  pinMode(PinInt2, INPUT_PULLUP); // pin 16
+  
+//  pinMode(0, INPUT_PULLUP);  // already defined above
+  pinMode(1, INPUT_PULLUP); // determines if three knob controller is connected  
+  pinMode(2, INPUT_PULLUP); // sw 7 config switch to set divider ratio bit 0
+  pinMode(3, OUTPUT); // step
+  pinMode(4, OUTPUT); // direction 
+// the following are for digital encoder, no pullup required but might be necessary for slave operation???
+  pinMode(5, INPUT_PULLUP); // encoder, no pullup
+  pinMode(6, INPUT_PULLUP); // encoder, no pullup   
+  pinMode(7, INPUT_PULLUP); // encoder pin  
+  pinMode(8, INPUT_PULLUP); // sw 6 config switch to set divider ratio bit 1
+  pinMode(9, INPUT_PULLUP); // limit switch for both directions
+  pinMode(10, INPUT_PULLUP); // not used with single limit switch  
+  pinMode(11, INPUT_PULLUP); // sw 4 config switch to choose seek home option at boot
+  pinMode(12, INPUT_PULLUP);  // joystick speed choosing switch
+  pinMode(13, OUTPUT);        // built in LED
+  pinMode(14, INPUT_PULLUP);  // joystick speed choosing switch
+  pinMode(15, INPUT_PULLUP);
+ // pinMode(16, INPUT_PULLUP);  // already defined above
+  pinMode(17, INPUT_PULLUP); // encoder pin
+  pinMode(18, INPUT_PULLUP); // encoder pin   
+  pinMode(19, INPUT_PULLUP); // test mode switch, pullup
+  pinMode(20, INPUT_PULLUP); // encoder pin  
+  pinMode(21, INPUT_PULLUP); // encoder, pullup    
+  pinMode(22, OUTPUT);  // quadrature output for slave phase A
+  pinMode(23, OUTPUT);  // quadrature output for slave phase B
+  
+  attachInterrupt(PinInt1, isrFor, FALLING); // pins 0 and 16 connect to output of audio decoder 
+  attachInterrupt(PinInt2, isrBack, FALLING); 
+   
+  delay (500);  // not sure why this ended up here, probably not necessary bcause 2000 ms second is just before pinmode setup above
+  
+  no_three_knob = true;
+      
+  if (digitalReadFast(1)== LOW){  // pin one is connected to a wire on the three knob controller that is grounded if the controller is connected
+    no_three_knob = false;        // 
+  }    
+  
+  if (digitalReadFast(2)== LOW){  // config switches are read to determine encoder scaling factor
+    ratio_bit_0 = 1;
+  }  
+  if (digitalReadFast(8)== LOW){
+    ratio_bit_1 = 1;
+  }  
+  ratio = 1 + ratio_bit_0 + (ratio_bit_1 * 2); // to get a ratio from 1 to 4
+  encoder_up_count = ratio;   
+  encoder_down_count = -1 * ratio; 
+  
+ // setup procedure here, sotre default parameters in eeprom if eeprom is empty otherwise get stored parameters
+
+ 
+  address = 0; //EEPROM address to start reading from
+  EEPROM.get( address, value );
+  if (value == -1){  // virgin teensy EEPROM empty
+    Serial.println("0 address is -1");    
+    EEPROM.put(address, max_speed_default);  
+    address = 5;
+    EEPROM.put(address, max_stroke_default);
+    address = 10;
+    EEPROM.put(address, acceleration);
+  }
+  else{
+    get_parameters();   
+    if ((max_speed == 0) || (max_stroke == 0) ||(acceleration == 0)) {  // restore default values if restore was commanded (see user manual for explanation)
+      max_speed = max_speed_default;  // in case 0 was set change back to default
+      max_stroke = max_stroke_default;
+      acceleration = acceleration_default;
+      address = 0;
+      EEPROM.put(address, max_speed);  
+      address = 5;
+      EEPROM.put(address, max_stroke);
+      address = 10;
+      EEPROM.put(address, acceleration); 
+      run = true;
+      if (speed < min_speed) run = false;  
+      stepper.setMaxSpeed(speed);   
+      stepper.setAcceleration(acceleration);
+      estop();   
+      was_reset = true;
+    }         
+    get_parameters();   
+  }
+  get_parameters();
+  int test_speed = max(max_speed, min_speed);
+  crawl_delay = 12000 / test_speed;
+
+  if (digitalReadFast(11)== HIGH){  // run seek home routine unless config switch 4 is on to prevent it
+    while (digitalReadFast(10)== HIGH){  // 
+      cwpulse();
+//      delayMicroseconds(1000);
+      delay (crawl_delay);
+    }       
+     
+    while (digitalReadFast(9)== HIGH){  // 
+      ccwpulse();   
+      delay (crawl_delay);  
+    }  
+  }
+  if ((was_reset == false) && (digitalReadFast(1)== HIGH) && (no_three_knob == false)){  // if setup button is pressed run in parameter setup mode
+    while (digitalReadFast(1)== HIGH){
+      set_parameters();
+      new_parameters = true;
+    }    
+  }
+  if (new_parameters == true){  // i think this is redundant but i am leaving it here until i am sure
+    address = 0;
+    EEPROM.put(address, max_speed_setup);  
+    address = 5;
+    EEPROM.put(address, max_stroke_setup);
+    address = 10;
+    EEPROM.put(address, acceleration_setup);
+  }
+  get_parameters();
+  digitalWriteFast(LED_BUILTIN, HIGH);  
+}
+
+void loop() {  // main loop is very simple, reads encoders, run repeat cycle motions and service limit switches
+   interrupts();
+   if ((digitalReadFast(1)== HIGH) && (no_three_knob == false)){  // this might trigger after parameter setting but it should be OK
+      estop();
+   }     
+   read_encoders();  
+   do_serial();
+   while(digitalReadFast(10) == LOW){
+       ccwpulse();
+       delay(3);     
+   }
+   while(digitalReadFast(9) == LOW){
+       cwpulse();
+       delay(3);      
+   }   
+    if (run){
+       if (forward == true) {
+            stepper.moveTo (off_plus_stroke);
+       }
+       else{  
+            stepper.moveTo(offset);  // only need to move to new offset position if there is no stroke
+       }
+       if (stepper.distanceToGo() == 0){	
+         if (stroke > 0) forward = !forward;  // no need to switch if no stoke
+       }
+       stepper.run(); 
+    }    
+}
+void do_serial(){
+  byte incomingByte;   
+  if (Serial.available() > 0) {
+      while(Serial.available()){
+        incomingByte = Serial.read();
+      }     
+//      Serial.print( "CW count: " );
+//      Serial.print(CW_count);  
+//      Serial.print( " CCW count: " );
+//      Serial.println(CCW_count);    
+//      CW_count = 0;
+//      CCW_count = 0;   
+  }    
+}
+void isrFor()  // called from interrupt pin fo CW pulse
+{
+  cli();
+//  zero_count ++;
+  do_CW = true;  // flag set so will run cwpulse when loop cycles, this is to avoid using delay in an ISRj
+  sei();
+} 
+ void isrBack()  // called from interrupt pin fo CCW pulse
+{
+  cli();
+//  one_count ++;
+  do_CCW = true;
+  sei();
+} 
+void read_encoders(){ 
+  encoder_scale = 2;
+  // for some reason, first machine had socket wired opposite so it need to have 12 and 14 swapped
+  if(digitalReadFast(14) == LOW){
+    encoder_scale = 4;
+    }
+  if(digitalReadFast(12) == LOW){
+    encoder_scale = 1;
+    }   
+    readEncoder_1 = readEnc1.read();
+    if (readEncoder_1 < encoder_down_count) {  // forward or clockwise
+      if (digitalReadFast(10) == HIGH) {
+          cwpulse();
+      }
+      readEnc1.write(0);
+    }   
+    if (readEncoder_1 > encoder_up_count){ // backwards or counter clockwise
+      if (digitalReadFast(9) == HIGH) {
+          ccwpulse();       
+      }
+      readEnc1.write(0);
+    }      
+    if (do_CW){  // flag set by interrupt on pin 0
+      do_CW = false;
+      cwpulse_audio();
+    }
+    if (do_CCW){  // flag set by interrupt on pin 16
+      do_CCW = false;
+      ccwpulse_audio();
+    }
+    if (no_three_knob == false){
+      readEncoder_2 = readEnc2.read();
+      readEncoder_3 = readEnc3.read();  
+      readEncoder_4 = readEnc4.read();  
+  //    readEncoder_5 = readEnc5.read(); 
+      offset += (readEncoder_4 * offset_scale);  
+      if (offset < 0) offset = 0;  // if commented out this allows for negative offset which is probably bad
+      read_speed = constrain ((read_speed + readEncoder_2),0,102);
+      read_stroke = constrain ((read_stroke + readEncoder_3),0,102); 
+      stroke = constrain ((stroke_table[read_stroke]),0,max_stroke);
+      off_plus_stroke = constrain ((offset + stroke),0,max_stroke_default);    
+      if (stroke < vibe_limit){
+        speed = constrain ((speed_table[read_speed]),0,max_speed_default);
+      }
+      else{
+        speed = constrain ((speed_table[read_speed]),0,max_speed);
+      } 
+      run = true;
+      if (speed < min_speed) run = false;
+      stepper.setMaxSpeed(speed);         
+      readEnc2.write(0);
+      readEnc3.write(0);  
+      readEnc4.write(0);        
+    }
+} 
+void cwpulse(void){
+    if (digitalReadFast(10) == LOW){  // trying to move forward by audio or joystick but limit is reached so backoff routine needs to set
+      digitalWriteFast(4, HIGH);      // direction high to allow backoff therefore this is necessary because audio pulses are via an interrupt
+    }                                 // however the pulse is in the loop triggered by a flag so maybe it is not necessary, have to test this
+    else{
+      digitalWriteFast(4, LOW); // pin 4 low for CW 
+    }
+    delayMicroseconds(1);  //dir must preceed step by 200 ns
+    for (int i=0; i < encoder_scale; i++){
+      quad_for();
+      digitalWriteFast(3, HIGH); // step occurs on positive transition
+      delayMicroseconds(3);      // needs to be 2, 1 is not enough for Chinese stepper might be enough for Gecko
+      digitalWriteFast(3, LOW); // pin 3 remains low until next step pulse
+      delayMicroseconds(2);   // needed for time to read the analog input 
+    }
+} 
+void ccwpulse(void){
+    digitalWriteFast(4, HIGH); // pin 4 high for CCW 
+    delayMicroseconds(1);  //dir must preceed step by 200 ns
+    for (int i=0; i < encoder_scale; i++){
+      quad_back();  
+      digitalWriteFast(3, HIGH); // pin 3 high
+      delayMicroseconds(3);  
+      digitalWriteFast(3, LOW); // pin 3 low  
+      delayMicroseconds(2);   // needed for time to read the analog input 
+    }    
+}
+void cwpulse_audio(void){  // when responding to audio signals slave output is not done 
+//   CW_count ++;
+//  digitalWriteFast(LED_BUILTIN, HIGH);
+//  digitalWriteFast(LED_BUILTIN, !digitalReadFast(LED_BUILTIN));
+//    noInterrupts();
+    if (digitalReadFast(10) == LOW){  // trying to move forward by audio or joystick but limit is reached so backoff routine needs to set
+      digitalWriteFast(4, HIGH);      // direction high to allow backoff therefore this is necessary because audio pulses are via an interrupt
+    }                                 // however the pulse is in the loop triggered by a flag so maybe this is not necessary, have to test this
+    else{
+      digitalWriteFast(4, LOW); // pin 4 low for CW 
+    }
+    delayMicroseconds(1);  //dir must preceed step by 200 ns
+    for (int i=0; i < encoder_scale; i++){
+//      delayMicroseconds(1); 
+      digitalWriteFast(3, HIGH); // step occurs on positive transition
+      delayMicroseconds(2);      // was 2 try 3 to see if it works for single pulse
+      digitalWriteFast(3, LOW); // pin 3 remains low until next step pulse
+      delayMicroseconds(2);   // was 2 try 3 to see if it works for single pulse 
+    }
+} 
+void ccwpulse_audio(void){  
+//   CCW_count ++;
+//    digitalWriteFast(LED_BUILTIN, LOW);
+//  digitalWriteFast(LED_BUILTIN, !digitalReadFast(LED_BUILTIN));
+    digitalWriteFast(4, HIGH); // pin 4 high for CCW 
+    delayMicroseconds(1);  //dir must preceed step by 200 ns
+    for (int i=0; i < encoder_scale; i++){
+//      delayMicroseconds(1); 
+      digitalWriteFast(3, HIGH); // pin 3 high
+      delayMicroseconds(2);  // was 2 try 3 to see if it works for single pulse
+      digitalWriteFast(3, LOW); // pin 3 low  
+      delayMicroseconds(2);   // was 2 try 3 to see if it works for single pulse 
+    }    
+}
+void quad_for(void){  // quadrture out on pins 22 and 23 (slave output)
+     digitalWriteFast(22, LOW);  // A phase leads
+     delayMicroseconds(quad_delay);
+     digitalWriteFast(23, LOW);
+     delayMicroseconds(quad_delay);
+     digitalWriteFast(22, HIGH);
+     delayMicroseconds(quad_delay);
+     digitalWriteFast(23, HIGH);
+}
+void quad_back(void){  // quadrture out on pins 22 and 23
+     digitalWriteFast(23, LOW);  // B phase leads
+     delayMicroseconds(quad_delay);
+     digitalWriteFast(22, LOW);
+     delayMicroseconds(quad_delay);
+     digitalWriteFast(23, HIGH);
+     delayMicroseconds(quad_delay);
+     digitalWriteFast(22, HIGH);    
+}
+void get_parameters(){
+    address = 0;
+    EEPROM.get(address, max_speed);    
+    address = 5;
+    EEPROM.get(address, max_stroke);
+    address = 10;
+    EEPROM.get(address, acceleration); 
+    Serial.print( "max speed: " );
+    Serial.println(max_speed);  
+    Serial.print( "max stroke: " );
+    Serial.println(max_stroke);     
+}    
+void set_parameters() {  // this is similar to the main loop but runs only in parameter setting mode during boot time setup read user manual to understand this procedure
+   read_encoders_setup();
+   while(digitalReadFast(10) == LOW){
+       ccwpulse(); 
+       delay(3);     
+   }
+   while(digitalReadFast(9) == LOW){
+       cwpulse(); 
+       delay(3);      
+   }   
+   if (forward == true) {
+        stepper.moveTo (off_plus_stroke);
+   }
+   else{  
+        stepper.moveTo(offset);  // only need to move to new offset position if there is no stroke
+   }
+   if (stepper.distanceToGo() == 0){	
+     if (stroke > 0) forward = !forward;  // no need to switch if no stoke
+   }
+   stepper.run(); 
+}
+
+void read_encoders_setup(){ // simplified read encoders routine used only during parameter setup
+    readEncoder_2 = readEnc2.read();
+    readEncoder_3 = readEnc3.read();  
+    readEncoder_4 = readEnc4.read();  
+    acceleration += (readEncoder_4 * 500);  
+    if (acceleration < min_acceleration) acceleration = min_acceleration;
+    if (acceleration > max_acceleration) acceleration = max_acceleration;   
+    read_speed = constrain ((read_speed + readEncoder_2),0,102);
+//    speed = constrain ((speed_table[read_speed]),0,max_speed_default);
+    run = true;
+    if (speed < min_speed) run = false;
+    speed = constrain ((speed_table[read_speed]),0,max_speed_default);
+    read_stroke = constrain ((read_stroke + readEncoder_3),0,102); 
+    stroke = constrain ((stroke_table[read_stroke]),0,max_stroke_default);
+    off_plus_stroke = constrain ((offset + stroke),0,max_stroke_default);       
+//    speed = constrain ((speed_table[read_speed]),0,max_speed);
+    stepper.setMaxSpeed(speed);   
+    stepper.setAcceleration(acceleration);
+    acceleration_setup = acceleration;
+    max_stroke_setup = stroke;
+    max_speed_setup = speed;
+    readEnc2.write(0);
+    readEnc3.write(0);  
+    readEnc4.write(0);   
+//    stroke = read_stroke * (max_stroke / 100);
+}
+void estop(){
+  readEnc2.write(0);
+  readEnc3.write(0);  
+  readEnc4.write(0);   
+  read_speed = 0;
+  read_stroke = 0;   
+  speed = 0;
+  stepper.setMaxSpeed(speed); 
+  stroke = 0;
+  offset = 0;
+  off_plus_stroke = 0;
+  run = false;
+  while (digitalReadFast(9)== HIGH){  // 
+    ccwpulse();
+    delayMicroseconds(3000);    
+  }    
+}
+
