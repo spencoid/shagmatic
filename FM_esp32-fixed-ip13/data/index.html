@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<head>
+<style>
+body,html {
+	background: white;
+	font-size:45px;
+	position: relative;
+	font-family: Roboto Slab
+}
+input[type=range]{
+	-webkit-appearance: none;
+	width: 600px;		
+	margin-top: 0px;
+}
+
+input[type=range]::-webkit-slider-runnable-track {
+	height: 20px;
+	background: #ddd;
+	border: none;
+	border-radius: 5px;
+}
+
+input[type=range]::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	border: none;
+	height: 70px;
+	width: 70px;
+	border-radius: 40%;
+	background: goldenrod;
+	margin-top: -25px;
+}
+
+input[type=range]:focus {
+	outline: none;
+}
+
+input[type=range]:focus::-webkit-slider-runnable-track {
+	background: #ccc;
+}
+</style>                
+<script>
+var websock;
+function start() {
+	websock = new WebSocket('ws://' + window.location.hostname + ':81/');
+	websock.onopen = function(evt) { console.log('websock open'); };
+	websock.onclose = function(evt) { console.log('websock close'); };
+	websock.onerror = function(evt) { console.log(evt); };
+	websock.onmessage = function(evt) {console.log(evt); };
+}
+function slide(val) {
+	let sendval = val.id + " " + val.value;
+	websock.send(sendval);
+}
+
+
+</script>
+</head>
+<body onload="javascript:start();">
+	<center>	
+		Speed<br>
+		<input type="range" min="1" max="105" value="1" id="s" oninput="slide(this)"><br>
+		Stroke<br>
+		<input type="range" min="1" max="105" value="1" id="t" oninput="slide(this)"><br>
+		Offset<br>
+		<input type="range" min="1" max="105" value="1" id="o" oninput="slide(this)"><br>
+		<br><input type="button" style="font: 45px Roboto Slab" value="E-Stop"  id="p" onclick="slide(this)"><br>
+	</center>  
+</body>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
